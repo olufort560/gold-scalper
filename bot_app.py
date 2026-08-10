@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
 import time
+import numpy as np
 from datetime import datetime
 
 # Try to import MT5, but don't crash if it's not installed
@@ -21,51 +22,53 @@ symbol = st.sidebar.text_input("Gold Symbol", "XAUUSD")
 timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m"])
 
 # Function to get data
-@st.cache_data(ttl=10)  # refresh every 10 seconds
+@st.cache_data(ttl=10)
 def get_gold_data():
     if MT5_AVAILABLE:
         st.sidebar.success("MT5 Connected ✅")
-        # Real MT5 data would go here
-        # For now return demo
-        pass
     
-    # DEMO DATA from Yahoo Finance - works on Streamlit Cloud
+    # DEMO DATA from Yahoo Finance
     try:
         ticker = "GC=F"  # Gold Futures
-        data = yf.download(ticker, period="1d", interval="1m")
-        data = data.tail(200)  # last 200 candles
-        data.reset_index(inplace=True)
-        data['Close'] = data['Close'].ffill()
+        data = yf.download(ticker, period="5d", interval="1m")
+        
+        # FIX: Flatten columns if yfinance returns MultiIndex
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        
+        data = data.tail(200).reset_index()
+        data = data[['Datetime', 'Close']].ffill()
         return data
     except:
-        # If yfinance fails, make fake data
+        # Fake data if yfinance fails
         dates = pd.date_range(end=datetime.now(), periods=200, freq='1min')
-        price = 2300 + pd.Series(range(200)).cumsum() * 0.5
+        price = 2300 + np.cumsum(np.random.randn(200) * 0.5)
         data = pd.DataFrame({'Datetime': dates, 'Close': price})
         return data
 
 # Get data
 data = get_gold_data()
 
-# Show metrics
+# Show metrics - FIXED
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric("Current Price", f"${data['Close'].iloc[-1]:.2f}")
+    current_price = float(data['Close'].iloc[-1])
+    st.metric("Current Price", f"${current_price:.2f}")
 with col2:
-    change = data['Close'].iloc[-1] - data['Close'].iloc[-2]
+    prev_price = float(data['Close'].iloc[-2])
+    change = current_price - prev_price
     st.metric("Change", f"${change:.2f}")
 with col3:
     st.metric("MT5 Status", "Connected" if MT5_AVAILABLE else "Demo Mode")
 
-# Candlestick Chart
-fig = go.Figure(data=[go.Candlestick(
-    x=data.index,
-    open=data['Close'],
-    high=data['Close'] * 1.001,
-    low=data['Close'] * 0.999,
-    close=data['Close']
+# Candlestick Chart - FIXED
+fig = go.Figure(data=[go.Scatter(
+    x=data['Datetime'],
+    y=data['Close'],
+    mode='lines',
+    name='Gold Price'
 )])
-fig.update_layout(title=f"{symbol} Live Chart", xaxis_rangeslider_visible=False)
+fig.update_layout(title=f"{symbol} Live Chart")
 st.plotly_chart(fig, use_container_width=True)
 
 # Trade Log
