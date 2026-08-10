@@ -1,0 +1,60 @@
+import MetaTrader5 as mt5
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+
+st.set_page_config(page_title="GoldScalper Dashboard", layout="wide")
+st.title("🤖 GoldScalper V12 Monitor")
+
+# CONNECT TO MT5
+if not mt5.initialize():
+    st.error("❌ MT5 is not open! Open MetaTrader 5 on your PC first")
+    st.stop()
+else:
+    st.success("✅ Connected to MT5")
+
+account = mt5.account_info()
+positions = mt5.positions_get()
+today = datetime.now().date()
+deals = mt5.history_deals_get(datetime(today.year, today.month, today.day), datetime.now())
+
+# TOP STATS
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Balance", f"${account.balance:.2f}")
+col2.metric("Equity", f"${account.equity:.2f}")
+col3.metric("Open Trades", len(positions))
+daily_pnl = sum([d.profit for d in deals]) if deals else 0
+col4.metric("Today PnL", f"${daily_pnl:.2f}")
+
+st.divider()
+
+# OPEN TRADES
+st.subheader("📊 Live Trades")
+if positions:
+    data = []
+    for p in positions:
+        data.append({
+            "Ticket": p.ticket, "Symbol": p.symbol, 
+            "Type": "BUY" if p.type == 0 else "SELL",
+            "Lot": p.volume, "Profit": f"${p.profit:.2f}"
+        })
+    st.dataframe(pd.DataFrame(data), use_container_width=True)
+else:
+    st.info("No open trades right now")
+
+# STOP BUTTON
+st.divider()
+if st.button("🛑 STOP ALL TRADES NOW", type="primary"):
+    for p in positions:
+        mt5.Close(p.ticket)
+    st.warning("Sent close command to all trades")
+
+# TODAY'S HISTORY
+st.subheader("📈 Today's Closed Trades")
+if deals:
+    data = [{"Time": d.time.strftime('%H:%M'), "Symbol": d.symbol, "Profit": f"${d.profit:.2f}"} for d in deals]
+    st.dataframe(pd.DataFrame(data), use_container_width=True)
+else:
+    st.info("No trades closed today yet")
+
+mt5.shutdown()
