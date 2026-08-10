@@ -1,81 +1,100 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import yfinance as yf
+import MetaTrader5 as mt5
+import pytz
 import time
-import numpy as np
-from datetime import datetime
+from datetime import datetime, time as dtime
 
-# Try to import MT5, but don't crash if it's not installed
-try:
-    import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
-except:
-    MT5_AVAILABLE = False
+st.set_page_config(page_title="Gold AutoTrader", layout="wide")
+st.title("🥇 Gold AutoTrader - London Killzone")
 
-st.set_page_config(page_title="Gold Scalper Dashboard", layout="wide")
-st.title("🥇 Gold Scalper Live Dashboard")
+# --- SETTINGS ---
+symbol = "XAUUSD"
+lot_size = 0.01
+sl_pips = 150  # 15 pips
+tp_pips = 300  # 30 pips
+daily_loss_limit = 10.0  # $10
+magic_number = 12345
 
-# Sidebar for settings
-st.sidebar.header("Settings")
-symbol = st.sidebar.text_input("Gold Symbol", "XAUUSD")
-timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m"])
+# --- CONNECT MT5 ---
+if not mt5.initialize():
+    st.error("MT5 NOT CONNECTED! Open MT5 on your PC first")
+    st.stop()
+else:
+    st.sidebar.success("MT5 CONNECTED ✅")
 
-# Function to get data
-@st.cache_data(ttl=10)
-def get_gold_data():
-    if MT5_AVAILABLE:
-        st.sidebar.success("MT5 Connected ✅")
+account = mt5.account_info()
+st.sidebar.metric("Balance", f"${account.balance:.2f}")
+st.sidebar.metric("Equity", f"${account.equity:.2f}")
+
+# --- TRADING FUNCTIONS ---
+def get_data():
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 300)
+    df = pd.DataFrame(rates)
+    df['time'] = pd.to_datetime(df['time'], unit='s')
+    df['vwap'] = (df['close'] * df['tick_volume']).cumsum() / df['tick_volume'].cumsum()
+    df['rsi'] = 100 - (100 / (1 + df['close'].pct_change().rolling(14).mean() / df['close'].pct_change().rolling(14).std()))
+    return df
+
+def in_london_session():
+    gmt = pytz.timezone('GMT')
+    now = datetime.now(gmt).time()
+    return dtime(8,0) <= now <= dtime(11,0)
+
+def place_trade(order_type):
+    price = mt5.symbol_info_tick(symbol).ask if order_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(symbol).bid
+    sl = price - sl_pips * 0.1 if order_type == mt5.ORDER_TYPE_BUY else price + sl_pips * 0.1
+    tp = price + tp_pips * 0.1 if order_type == mt5.ORDER_TYPE_BUY else price - tp_pips * 0.1
     
-    # DEMO DATA from Yahoo Finance
-    try:
-        ticker = "GC=F"  # Gold Futures
-        data = yf.download(ticker, period="5d", interval="1m")
-        
-        # FIX: Flatten columns if yfinance returns MultiIndex
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        
-        data = data.tail(200).reset_index()
-        data = data[['Datetime', 'Close']].ffill()
-        return data
-    except:
-        # Fake data if yfinance fails
-        dates = pd.date_range(end=datetime.now(), periods=200, freq='1min')
-        price = 2300 + np.cumsum(np.random.randn(200) * 0.5)
-        data = pd.DataFrame({'Datetime': dates, 'Close': price})
-        return data
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": lot_size,
+        "type": order_type,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "magic": magic_number,
+        "comment": "London Killzone Bot",
+    }
+    result = mt5.order_send(request)
+    return result
 
-# Get data
-data = get_gold_data()
+# --- MAIN LOGIC ---
+daily_pnl = 0
+positions = mt5.positions_get(symbol=symbol)
 
-# Show metrics - FIXED
 col1, col2, col3 = st.columns(3)
 with col1:
-    current_price = float(data['Close'].iloc[-1])
-    st.metric("Current Price", f"${current_price:.2f}")
+    st.metric("Session", "LONDON OPEN" if in_london_session() else "CLOSED")
 with col2:
-    prev_price = float(data['Close'].iloc[-2])
-    change = current_price - prev_price
-    st.metric("Change", f"${change:.2f}")
+    st.metric("Open Trades", len(positions))
 with col3:
-    st.metric("MT5 Status", "Connected" if MT5_AVAILABLE else "Demo Mode")
+    st.metric("Daily P&L", f"${daily_pnl:.2f}")
 
-# Candlestick Chart - FIXED
-fig = go.Figure(data=[go.Scatter(
-    x=data['Datetime'],
-    y=data['Close'],
-    mode='lines',
-    name='Gold Price'
-)])
-fig.update_layout(title=f"{symbol} Live Chart")
-st.plotly_chart(fig, use_container_width=True)
+data = get_data()
+last = data.iloc[-1]
 
-# Trade Log
-st.subheader("Recent Signals")
-st.write("Waiting for Gold Scalper signals...")
-st.info("To connect real MT5: Run this bot from your laptop with MT5 installed")
+# TRADING RULES
+can_trade = len(positions) == 0 and in_london_session() and daily_pnl > -daily_loss_limit
 
-# Auto refresh
-time.sleep(5)
+if can_trade:
+    # BUY RULE: Price > VWAP AND RSI > 50
+    if last['close'] > last['vwap'] and last['rsi'] > 50:
+        st.warning("BUY SIGNAL! Placing order...")
+        res = place_trade(mt5.ORDER_TYPE_BUY)
+        if res.retcode == mt5.TRADE_RETCODE_DONE:
+            st.success(f"BUY ORDER PLACED! Ticket: {res.order}")
+    
+    # SELL RULE: Price < VWAP AND RSI < 50
+    elif last['close'] < last['vwap'] and last['rsi'] < 50:
+        st.warning("SELL SIGNAL! Placing order...")
+        res = place_trade(mt5.ORDER_TYPE_SELL)
+        if res.retcode == mt5.TRADE_RETCODE_DONE:
+            st.success(f"SELL ORDER PLACED! Ticket: {res.order}")
+else:
+    st.info("Waiting for London session 8-11am GMT or Daily limit reached")
+
+# Auto refresh every 10 seconds
+time.sleep(10)
 st.rerun()
